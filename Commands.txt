@@ -1,0 +1,53 @@
+Run Zookeeper:
+-----------------------
+.\bin\windows\zookeeper-server-start.bat .\config\zookeeper.properties
+
+Run Kafka Server:
+---------------------------
+.\bin\windows\kafka-server-start.bat .\config\server.properties
+
+Stop Kafka Server:
+----------------------------
+.\bin\windows\zookeeper-server-stop.bat .\config\zookeeper.properties
+
+Creating The Two Topics:
+--------------------------------------
+== raw_clickstream ==
+.\bin\windows\kafka-topics.bat --create --bootstrap-server localhost:9092 --topic raw_clickstream
+== clean_clickstream ==
+.\bin\windows\kafka-topics.bat --create --bootstrap-server localhost:9092 --topic clean_clickstream
+
+Deleting The Topics:
+-------------------------------
+.\bin\windows\kafka-topics.bat --delete --bootstrap-server localhost:9092 --topic raw_clickstream
+.\bin\windows\kafka-topics.bat --delete --bootstrap-server localhost:9092 --topic clean_clickstream
+
+
+Listing The Topics:
+----------------------------
+.\bin\windows\kafka-topics.bat --list --bootstrap-server localhost:9092
+
+
+Submit The Producer:
+--------------------------------
+spark-submit producer.py
+
+Submit The Consumer:
+----------------------------------
+spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1,org.apache.spark:spark-streaming-kafka-0-10_2.13:4.0.1,org.apache.kafka:kafka-clients:3.9.1 spark-structure-streaming.py
+
+Run NiFi:
+---------------
+.\bin\nifi.cmd run
+
+https://localhost:8443/nifi
+
+
+
+
+
+
+
+
+
+

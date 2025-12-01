@@ -1,0 +1,5 @@
+Dataset:
+------------
+https://www.kaggle.com/datasets/retailrocket/ecommerce-dataset
+
+*** The only file used from the dataset is the events file, however I put its link here to ensure that everyone has the entire dataset if we had to use another file.
