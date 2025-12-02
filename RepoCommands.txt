@@ -6,9 +6,19 @@ Run Kafka Server:
 ---------------------------
 .\bin\windows\kafka-server-start.bat .\config\server.properties
 
+Run NiFi:
+---------------
+.\bin\nifi.cmd run
+
+https://localhost:8443/nifi
+
 Stop Kafka Server:
 ----------------------------
 .\bin\windows\zookeeper-server-stop.bat .\config\zookeeper.properties
+
+Stop NiFi:
+---------------
+.\bin\nifi.cmd stop
 
 Creating The Two Topics:
 --------------------------------------
@@ -34,20 +44,7 @@ spark-submit producer.py
 
 Submit The Consumer:
 ----------------------------------
-spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1,org.apache.spark:spark-streaming-kafka-0-10_2.13:4.0.1,org.apache.kafka:kafka-clients:3.9.1 spark-structure-streaming.py
+spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1,org.apache.spark:spark-streaming-kafka-0-10_2.13:4.0.1,org.apache.kafka:kafka-clients:3.9.1 stream_processor.py
 
-Run NiFi:
----------------
-.\bin\nifi.cmd run
-
-https://localhost:8443/nifi
-
-
-
-
-
-
-
-
-
+spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1,org.apache.spark:spark-streaming-kafka-0-10_2.13:4.0.1,org.apache.kafka:kafka-clients:3.9.1 consumer.py
 
