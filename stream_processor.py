@@ -16,6 +16,13 @@ DB_PROPERTIES = {
     "driver": "org.postgresql.Driver"
 }
 
+# JDBC_URL = "jdbc:mysql://localhost:3306/clickstreamdb"
+# DB_PROPERTIES = {
+#     "user": "root",
+#     "password": "",
+#     "driver": "com.mysql.cj.jdbc.Driver"
+# }
+
 # -------------------------
 # SPARK SESSION
 # -------------------------
@@ -24,6 +31,7 @@ spark = SparkSession.builder \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("ERROR")
+
 
 # -------------------------
 # SCHEMA
@@ -37,6 +45,7 @@ schema = StructType([
     StructField("event_category", StringType(), True),
     StructField("unix_timestamp", StringType(), True)
 ])
+
 
 # -------------------------
 # READ KAFKA STREAM
@@ -65,9 +74,7 @@ print("Spark Streaming Job Started...")
 # -------------------------------------------------------------
 # ANALYSIS 1: EVENTS PER MINUTE
 # -------------------------------------------------------------
-def compute_events_per_minute(batch_df, batch_id):
-    print(f"Processing batch {batch_id}")
-
+def compute_events_per_minute(batch_df):
     result = (
         batch_df.withColumn("minute", date_trunc("minute", col("event_time")))
                 .groupBy("minute")
@@ -84,12 +91,125 @@ def compute_events_per_minute(batch_df, batch_id):
     )
 
 # -------------------------------------------------------------
+# ANALYSIS 2: Active Users in a minute
+# -------------------------------------------------------------
+
+def compute_active_users(df):
+    result = (
+        df.withColumn("minute", date_trunc("minute", col("event_time")))
+          .groupBy("minute")
+          .agg(count_distinct("visitorid").alias("active_users"))
+    )
+
+    result.write.jdbc(
+        url=JDBC_URL,
+        table="active_users",
+        mode="append",
+        properties=DB_PROPERTIES
+    )
+
+# -------------------------------------------------------------
+# ANALYSIS 3: Event Type Distribution
+# -------------------------------------------------------------
+def compute_event_type_distribution(batch_df):
+    result = (
+        batch_df.withColumn("minute", date_trunc("minute", col("event_time")))
+                .groupBy("minute", "event")
+                .count()
+                .withColumnRenamed("count", "event_count")
+    )
+
+    result.write.jdbc(
+        url=JDBC_URL,
+        table="event_type_distribution",
+        mode="append", 
+        properties=DB_PROPERTIES
+    )
+
+# -------------------------------------------------------------
+# ANALYSIS 4: Top Items Per Minute
+# -------------------------------------------------------------
+def compute_top_items(batch_df):
+    result = (
+        batch_df.withColumn("minute", date_trunc("minute", col("event_time")))
+                .groupBy("minute", "itemid")
+                .count()
+                .withColumnRenamed("count", "interactions")
+    )
+
+    result.write.jdbc(
+        url=JDBC_URL,
+        table="top_items",
+        mode="append", 
+        properties=DB_PROPERTIES
+    )
+
+# -------------------------------------------------------------
+# ANALYSIS 5: Bounce Rate (Users with Only 1 Event)
+# -------------------------------------------------------------
+def compute_bounce_rate(batch_df):
+    minute_df = batch_df.withColumn("minute", date_trunc("minute", col("event_time")))
+
+    per_user = (
+        minute_df.groupBy("minute", "visitorid")
+                 .count()
+                 .withColumnRenamed("count", "events")
+    )
+
+    result = (
+        per_user.groupBy("minute")
+                .agg(
+                    sum(when(col("events") == 1, 1).otherwise(0)).alias("bounces"),
+                    count("*").alias("total_users")
+                )
+                .withColumn("bounce_rate", col("bounces") / col("total_users"))
+    )
+
+    result.write.jdbc(
+        url=JDBC_URL,
+        table="bounce_rate",
+        mode="append", 
+        properties=DB_PROPERTIES
+    )
+
+# -------------------------------------------------------------
+# ANALYSIS 6: User Session Length Approximation
+# -------------------------------------------------------------
+def compute_session_length(batch_df):
+    minute_df = batch_df.withColumn("minute", date_trunc("minute", col("event_time")))
+
+    result = (
+        minute_df.groupBy("minute", "visitorid")
+                 .agg(
+                     (unix_timestamp(max("event_time")) - unix_timestamp(min("event_time")))
+                     .alias("session_length_seconds")
+                 )
+    )
+
+    result.write.jdbc(
+        url=JDBC_URL,
+        table="session_length",
+        mode="append", 
+        properties=DB_PROPERTIES
+    )
+
+# -------------------------------------------------------------
 # START STREAM
 # -------------------------------------------------------------
+def run_all_analyses(batch_df, batch_id):
+    print(f"Running analyses for batch {batch_id}")
+
+    compute_events_per_minute(batch_df)
+    compute_active_users(batch_df)
+    compute_event_type_distribution(batch_df)
+    compute_top_items(batch_df)
+    compute_bounce_rate(batch_df)
+    compute_session_length(batch_df)
+
 query = (
     stream_df.writeStream
+        .foreachBatch(run_all_analyses)
         .outputMode("append")
-        .foreachBatch(compute_events_per_minute)
         .option("checkpointLocation", CHECKPOINT_LOCATION)
         .start()
 )
