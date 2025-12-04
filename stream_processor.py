@@ -72,7 +72,167 @@ stream_df = stream_df.withColumn(
 print("Spark Streaming Job Started...")
 
 # -------------------------------------------------------------
-# ANALYSIS 1: EVENTS PER MINUTE
+# ANALYSIS 1: Full Sessionization
+# -------------------------------------------------------------
+def compute_sessionization(batch_df):
+    from pyspark.sql.window import Window
+
+    # Window per user ordered by event time
+    w = Window.partitionBy("visitorid").orderBy("event_time")
+    w_unbounded = w.rowsBetween(Window.unboundedPreceding, Window.currentRow)
+
+    # STEP 1 — previous event + time difference
+    df1 = (
+        batch_df
+        .withColumn("prev_event_time", lag("event_time").over(w))
+        .withColumn(
+            "diff_seconds",
+            unix_timestamp("event_time") - unix_timestamp("prev_event_time")
+        )
+    )
+
+    # STEP 2 — detect new session start
+    df2 = (
+        df1.withColumn(
+            "is_new_session",
+            when(col("prev_event_time").isNull(), 1)
+            .when(col("diff_seconds") > 1800, 1)  # 30 minutes
+            .otherwise(0)
+        )
+    )
+
+    # STEP 3 — cumulative session number per user
+    df3 = df2.withColumn(
+        "session_number",
+        sum("is_new_session").over(w_unbounded)
+    )
+
+    # STEP 4 — create global session_id
+    df4 = df3.withColumn(
+        "session_id",
+        concat_ws("_", col("visitorid"), col("session_number"))
+    )
+
+    # STEP 5 — aggregate to session-level metrics
+    session_df = (
+        df4.groupBy("session_id", "visitorid")
+           .agg(
+               min("event_time").alias("session_start"),
+               max("event_time").alias("session_end"),
+               count("*").alias("events_in_session")
+           )
+           .withColumn(
+               "session_length",
+               unix_timestamp("session_end") - unix_timestamp("session_start")
+           )
+    )
+
+    # Write to PostgreSQL
+    session_df.write.jdbc(
+        url=JDBC_URL,
+        table="sessions",
+        mode="append",
+        properties=DB_PROPERTIES
+    )
+
+    return df4
+
+
+# -------------------------------------------------------------
+# ANALYSIS 2: User Path Construction (Per Session)
+# -------------------------------------------------------------
+
+def compute_user_paths(sessionized_df):
+    """
+    Takes a sessionized batch dataframe (must contain session_id)
+    and builds ordered user event paths per session.
+    """
+    from pyspark.sql.functions import col, struct, collect_list, array_sort, expr
+
+    # 1. Create struct(event_time, event)
+    df_with_struct = sessionized_df.withColumn(
+        "event_struct",
+        struct(col("event_time"), col("event"))
+    )
+
+    # 2. Group by visitor + session
+    grouped = df_with_struct.groupBy(
+        "visitorid", "session_id"
+    ).agg(
+        collect_list("event_struct").alias("events")
+    )
+
+    # 3. Sort events by event_time
+    ordered = grouped.withColumn(
+        "ordered_events",
+        array_sort(col("events"))
+    )
+
+    # 4. Extract only the event names from sorted structs
+    result = ordered.withColumn(
+        "user_path",
+        expr("transform(ordered_events, x -> x.event)")
+    ).select(
+        "visitorid", "session_id", "user_path"
+    )
+
+    # Write to PostgreSQL
+    result.write.jdbc(
+        url=JDBC_URL,
+        table="user_paths",
+        mode="append",
+        properties=DB_PROPERTIES
+    )
+
+# -------------------------------------------------------------
+# ANALYSIS 3: Funnel Analysis
+# -------------------------------------------------------------
+
+def compute_funnel_analysis(sessionized_df, batch_id, funnel_steps=None):
+    """
+    Computes a simple funnel: counts number of sessions/users that reached each step.
+    sessionized_df must contain: visitorid, session_id, event
+    batch_id: integer, identifies the current streaming batch
+    funnel_steps: ordered list of events in the funnel
+    """
+    from pyspark.sql import DataFrame
+
+    if funnel_steps is None:
+        funnel_steps = ["view", "addtocart", "transaction"]
+
+    # 1. Aggregate events per session (distinct events per session)
+    session_events = (
+        sessionized_df.groupBy("session_id", "visitorid")
+        .agg(collect_list("event").alias("events"))
+    )
+
+    # 2. Create columns for each funnel step (1 if session contains the event)
+    for step in funnel_steps:
+        session_events = session_events.withColumn(
+            step,
+            when(array_contains(col("events"), step), 1).otherwise(0)
+        )
+
+    # 3. Aggregate counts per funnel step
+    funnel_counts = session_events.agg(
+        *[sum(step).alias(step) for step in funnel_steps]
+    )
+
+    # 4. Add batch_id and analysis_time
+    funnel_counts = funnel_counts.withColumn("batch_id", lit(batch_id)) \
+                                 .withColumn("analysis_time", current_timestamp()) \
+                                 .select("batch_id", "analysis_time", *funnel_steps)
+
+    # 5. Write to PostgreSQL
+    funnel_counts.write.jdbc(
+        url=JDBC_URL,
+        table="funnel_analysis",
+        mode="append",
+        properties=DB_PROPERTIES
+    )
+
+# -------------------------------------------------------------
+# ANALYSIS 4: EVENTS PER MINUTE
 # -------------------------------------------------------------
 def compute_events_per_minute(batch_df):
     result = (
@@ -91,7 +251,7 @@ def compute_events_per_minute(batch_df):
     )
 
 # -------------------------------------------------------------
-# ANALYSIS 2: Active Users in a minute
+# ANALYSIS 5: Active Users in a minute
 # -------------------------------------------------------------
 
 def compute_active_users(df):
@@ -109,7 +269,7 @@ def compute_active_users(df):
     )
 
 # -------------------------------------------------------------
-# ANALYSIS 3: Event Type Distribution
+# ANALYSIS 6: Event Type Distribution
 # -------------------------------------------------------------
 def compute_event_type_distribution(batch_df):
     result = (
@@ -127,25 +287,7 @@ def compute_event_type_distribution(batch_df):
     )
 
 # -------------------------------------------------------------
-# ANALYSIS 4: Top Items Per Minute
-# -------------------------------------------------------------
-def compute_top_items(batch_df):
-    result = (
-        batch_df.withColumn("minute", date_trunc("minute", col("event_time")))
-                .groupBy("minute", "itemid")
-                .count()
-                .withColumnRenamed("count", "interactions")
-    )
-
-    result.write.jdbc(
-        url=JDBC_URL,
-        table="top_items",
-        mode="append", 
-        properties=DB_PROPERTIES
-    )
-
-# -------------------------------------------------------------
-# ANALYSIS 5: Bounce Rate (Users with Only 1 Event)
+# ANALYSIS 7: Bounce Rate (Users with Only 1 Event)
 # -------------------------------------------------------------
 def compute_bounce_rate(batch_df):
     minute_df = batch_df.withColumn("minute", date_trunc("minute", col("event_time")))
@@ -173,25 +315,72 @@ def compute_bounce_rate(batch_df):
     )
 
 # -------------------------------------------------------------
-# ANALYSIS 6: User Session Length Approximation
+# ANALYSIS 8: Top Items Per Minute
 # -------------------------------------------------------------
-def compute_session_length(batch_df):
-    minute_df = batch_df.withColumn("minute", date_trunc("minute", col("event_time")))
-
+def compute_top_items(batch_df):
     result = (
-        minute_df.groupBy("minute", "visitorid")
-                 .agg(
-                     (unix_timestamp(max("event_time")) - unix_timestamp(min("event_time")))
-                     .alias("session_length_seconds")
-                 )
+        batch_df.withColumn("minute", date_trunc("minute", col("event_time")))
+                .groupBy("minute", "itemid")
+                .count()
+                .withColumnRenamed("count", "interactions")
     )
 
     result.write.jdbc(
         url=JDBC_URL,
-        table="session_length",
+        table="top_items",
         mode="append", 
         properties=DB_PROPERTIES
     )
+
+
+
+# -------------------------------------------------------------
+# ANALYSIS 9: Item Interaction Counts
+# -------------------------------------------------------------
+def compute_item_interactions(batch_df):
+    """
+    Counts all events per item in the batch (views, clicks, etc.)
+    """
+    item_counts = (
+        batch_df.groupBy("itemid")
+                .agg(count("*").alias("interaction_count"))
+    )
+
+    # Write to PostgreSQL
+    item_counts.write.jdbc(
+        url=JDBC_URL,
+        table="item_interactions",
+        mode="append",
+        properties=DB_PROPERTIES
+    )
+
+    return item_counts
+
+
+# -------------------------------------------------------------
+# ANALYSIS 10: Most Viewed Items
+# -------------------------------------------------------------
+def compute_most_viewed_items(batch_df):
+    """
+    Counts number of views per item in the batch.
+    """
+
+    viewed_df = (
+        batch_df.filter(col("event") == "view")
+                .groupBy("itemid")
+                .agg(count("*").alias("view_count"))
+    )
+
+    # Write to PostgreSQL
+    viewed_df.write.jdbc(
+        url=JDBC_URL,
+        table="most_viewed_items",
+        mode="append",
+        properties=DB_PROPERTIES
+    )
+
+    return viewed_df
+
 
 # -------------------------------------------------------------
 # START STREAM
@@ -199,12 +388,18 @@ def compute_session_length(batch_df):
 def run_all_analyses(batch_df, batch_id):
     print(f"Running analyses for batch {batch_id}")
 
-    compute_events_per_minute(batch_df)
-    compute_active_users(batch_df)
-    compute_event_type_distribution(batch_df)
-    compute_top_items(batch_df)
-    compute_bounce_rate(batch_df)
-    compute_session_length(batch_df)
+    # compute_events_per_minute(batch_df)
+    # compute_active_users(batch_df)
+    # compute_event_type_distribution(batch_df)
+    # compute_top_items(batch_df)
+    # compute_bounce_rate(batch_df)
+    # compute_session_length(batch_df)
+
+    sessionized_df = compute_sessionization(batch_df)
+    compute_user_paths(sessionized_df)
+    compute_funnel_analysis(sessionized_df, batch_id)
+    compute_item_interactions(batch_df)
+    compute_most_viewed_items(batch_df)
 
 query = (
     stream_df.writeStream
