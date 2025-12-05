@@ -2,6 +2,8 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
 from pyspark.sql.window import Window
+from pyspark.sql import DataFrame
+
 
 # -------------------------
 # CONFIG
@@ -75,8 +77,6 @@ print("Spark Streaming Job Started...")
 # ANALYSIS 1: Full Sessionization
 # -------------------------------------------------------------
 def compute_sessionization(batch_df):
-    from pyspark.sql.window import Window
-
     # Window per user ordered by event time
     w = Window.partitionBy("visitorid").orderBy("event_time")
     w_unbounded = w.rowsBetween(Window.unboundedPreceding, Window.currentRow)
@@ -147,8 +147,6 @@ def compute_user_paths(sessionized_df):
     Takes a sessionized batch dataframe (must contain session_id)
     and builds ordered user event paths per session.
     """
-    from pyspark.sql.functions import col, struct, collect_list, array_sort, expr
-
     # 1. Create struct(event_time, event)
     df_with_struct = sessionized_df.withColumn(
         "event_struct",
@@ -195,7 +193,6 @@ def compute_funnel_analysis(sessionized_df, batch_id, funnel_steps=None):
     batch_id: integer, identifies the current streaming batch
     funnel_steps: ordered list of events in the funnel
     """
-    from pyspark.sql import DataFrame
 
     if funnel_steps is None:
         funnel_steps = ["view", "addtocart", "transaction"]
@@ -388,12 +385,11 @@ def compute_most_viewed_items(batch_df):
 def run_all_analyses(batch_df, batch_id):
     print(f"Running analyses for batch {batch_id}")
 
-    # compute_events_per_minute(batch_df)
-    # compute_active_users(batch_df)
-    # compute_event_type_distribution(batch_df)
-    # compute_top_items(batch_df)
-    # compute_bounce_rate(batch_df)
-    # compute_session_length(batch_df)
+    compute_events_per_minute(batch_df)
+    compute_active_users(batch_df)
+    compute_event_type_distribution(batch_df)
+    compute_top_items(batch_df)
+    compute_bounce_rate(batch_df)
 
     sessionized_df = compute_sessionization(batch_df)
     compute_user_paths(sessionized_df)
@@ -410,4 +406,3 @@ query = (
 )
 
 query.awaitTermination()
-
